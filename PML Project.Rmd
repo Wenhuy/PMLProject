@@ -1,0 +1,156 @@
+---
+title: "PML Project"
+author: "Wenhuan Yang"
+date: "September 25, 2015"
+output: html_document
+---
+In this project we use data generously provided by Groupware@LES about personal activities. Our goal is to predict the manner in which the participants did the exercise.
+
+
+```{r,message = F}
+library(lattice)
+library(ggplot2)
+library(iterators)
+library(foreach)
+library(parallel)
+library(doParallel)
+library(survival)
+library(splines)
+library(gbm)
+library(caret)
+library(randomForest)
+
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+```
+
+After a careful look at the data, it's clear that many of the predictors contain mainly NA values which will not contribute to prediction at all. Hence it is intuitive to eliminate those variables to ease the process of model training.
+
+First we can shrink the testing data to have only informative predictors.
+
+```{R}
+newTesting <- testing[,colSums(is.na(testing))!=nrow(testing)]
+dim(testing)
+dim(newTesting)
+```
+
+After creating a new testing set, we now have only 60 variables instead of 160.
+
+Since our purpose is to predict classe values of the testing set, we can also shrink the training data to have identical predictors as the testing set. Even though some of the omitted predictors of testing set do have a few valid values in the training set. Including them won't 
+help with prediction at all.
+
+```{R}
+names(testing)[which(colSums(is.na(testing))==nrow(testing))] <- "DELETE ME"
+newTraining <- data.frame(training[which(colnames(training)==colnames(testing))],training$classe)
+names(newTraining)[60] <- "classe"
+dim(training)
+dim(newTraining)
+```
+
+Now the new training set is reduced to 60 variables as well.
+
+We can exmaine the data further and it seems that a few columns don't make any sense in predicting classe. We can do an exploratory analysis and look at the matrix plots to justfy our intuition. 
+
+```{R}
+featurePlot(x=newTraining[,c(1:4,60)],y=newTraining$classe,plot="pairs")
+```
+
+Clearly, column 2 to 4 contribute nothing to the variance of the classe variable. And even though at first glance, column 1 seems to be correlated with classe, after looking back at the original spreadsheet it is clear that the column 1 is just the serial number to keep recording the number of rows which is meaningless for our prediction.
+
+```{R}
+featurePlot(x=newTraining[,c(5:8,60)],y=newTraining$classe,plot="pairs")
+```
+
+It's very clear from the above plot that the column 8(which is roll_belt) is related to some variability of classe comapred to the other three columns.
+
+```{R}
+featurePlot(x=newTraining[,c(9:12,60)],y=newTraining$classe,plot="pairs")
+```
+
+In this plot, it seems like all the four columns have some ability to explain the variation of classe. And we won't show further matrix plots for simplicity
+
+Based on above discussion, we have proved our intuition that column 1 to 7 are better to be eliminated and we can further clean the data below:
+
+```{R}
+newTesting <- newTesting[,-c(1:7)]
+newTraining <- newTraining[,-c(1:7)]
+```
+
+We can even further shirnk the data by identifying highly correlated variables.
+
+```{R}
+correlationMatrix <- cor(newTraining[sapply(newTraining,is.numeric)])
+highlyCorrelated <- findCorrelation(correlationMatrix,cutoff = 0.75)
+length(highlyCorrelated)
+```
+
+We have 21 highly correlated variables we can eliminate
+
+```{R}
+newTraining = newTraining[,-highlyCorrelated]
+newTesting = newTesting[,-highlyCorrelated]
+dim(newTraining)
+dim(newTesting)
+```
+
+Now we are only left with 31(32 excludes the classe variable) predictors and we can start our model training process.
+
+To make this project reproducible we can set the seed as below.
+
+```{R}
+set.seed(2665)
+```
+
+To have a better understanding of how our model would perform, we can further split the new training set to a subtraining set and a validation set.
+
+```{R}
+inSub <- createDataPartition(newTraining$classe,p=0.7,list = FALSE)
+subtraining <- newTraining[inSub,]
+validation <- newTraining[-inSub,]
+```
+
+Since the sample size is quite large, we can use parallel processing to speed up the model training process.
+
+```{R}
+cluster <- makeCluster(4)
+registerDoParallel(cluster)
+```
+
+We can use a 5-fold cross validation to help pick features as well as pick prediction model.
+
+```{R}
+fitControl <- trainControl(method = "cv",number = 5)
+```
+
+Let's first try the random forest method, since it's very accurate upon predicting.
+
+```{R}
+modelRF <- train(classe~.,data=subtraining,method="rf",trControl=fitControl)
+stopCluster(cluster)
+```
+
+Now we can try a boosted tree model to see how it will perform compared to the random forest method.
+
+```{R,message=F}
+cluster <- makeCluster(4)
+registerDoParallel(cluster)
+modelGBM <- train(classe~.,data=subtraining,method="gbm")
+stopCluster(cluster)
+```
+
+Now we apply the two models we have on the validation set to get an idea of how accurate our prediction will be.
+
+```{R}
+predRF <- predict(modelRF,newdata = validation)
+predGBM <- predict(modelGBM,newdata = validation)
+(accuracyRF <- sum(validation$classe == predRF)/nrow(validation))
+(accuracyGBM <- sum(validation$classe == predGBM)/nrow(validation))
+```
+
+The random forest model has a better expected out-of-sample error rate and is much faster to implement. So let's continue with the random forest model to predict the testing set:
+
+```{R,message=F}
+predict(modelRF,newTesting)
+```
+
+Great! We got 100% correct prediction results!
